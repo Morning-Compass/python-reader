@@ -4,5 +4,6 @@
 __pycache__/
 static/
 extracted_svgs/
-.venv/
+*.venv*/
 *.pdf
+extracted_output/

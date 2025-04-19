@@ -1,7 +1,9 @@
 import os
 import fitz  # PyMuPDF
-from tqdm import tqdm  # For progress bar
+from tqdm import tqdm
 import xml.etree.ElementTree as ET
+import base64
+from io import BytesIO
 
 # Input PDF and output directory
 pdf_path = '23-10-EG-400-A-b_STD60_Klima_W&MPlanung_20250207.pdf'
@@ -15,24 +17,23 @@ os.makedirs(svg_pages_dir, exist_ok=True)
 print(f"Output directory created: {svg_pages_dir}")
 
 def drawing_to_svg_path(drawing, clip_id=None):
-    """Convert a drawing from page.get_drawings() to an SVG <path> element."""
     path_data = []
     start_pt = None
     for item in drawing.get("items", []):
         op = item[0]
-        if op == "m":  # Move-to: start a new subpath
+        if op == "m":
             p = item[1]
             start_pt = p
             path_data.append(f"M{p.x},{p.y}")
-        elif op == "l":  # Line-to
+        elif op == "l":
             p2 = item[2]
             path_data.append(f"L{p2.x},{p2.y}")
-        elif op == "c":  # Cubic-curve
+        elif op == "c":
             p2, p3, p4 = item[2], item[3], item[4]
             path_data.append(f"C{p2.x},{p2.y} {p3.x},{p3.y} {p4.x},{p4.y}")
-        elif op == "h":  # Close-path
+        elif op == "h":
             path_data.append("Z")
-        elif op == "re":  # Rectangle
+        elif op == "re":
             rect = item[1]
             if not isinstance(rect, fitz.Rect):
                 print(f"Unexpected type for rect: {type(rect)}")
@@ -43,7 +44,6 @@ def drawing_to_svg_path(drawing, clip_id=None):
     if not path_data:
         return None
 
-    # Get stroke and fill properties
     stroke = drawing.get("color", [0, 0, 0])
     stroke = (f"rgb({int(stroke[0]*255)},{int(stroke[1]*255)},{int(stroke[2]*255)})"
               if isinstance(stroke, (list, tuple)) and len(stroke) == 3 else "none")
@@ -66,9 +66,7 @@ def drawing_to_svg_path(drawing, clip_id=None):
 
     return ET.Element("path", attribs)
 
-
 def create_clip_path(drawing, clip_id):
-    """Create an SVG <clipPath> element from a drawing's clip or rect."""
     clip_path = ET.Element("clipPath", {"id": clip_id})
     if "rect" in drawing:
         rect = drawing["rect"]
@@ -93,28 +91,58 @@ def create_clip_path(drawing, clip_id):
         else:
             print(f"No valid clip rect found for drawing")
             return None
-
     return clip_path if len(clip_path) > 0 else None
 
 try:
-    # Open the PDF
     doc = fitz.open(pdf_path)
-    print(f"Successfully opened PDF: {pdf_path} ({len(doc)} pages)")
+    print(f"Successfully opened PDF: {pdf_path} ({len(doc)} pages)\n")
 
-    print("\n--- Starting Page SVG Export ---")
+    print("--- Starting Page SVG Export ---")
     svg_count = 0
 
     for page_index in tqdm(range(len(doc)), desc="Exporting pages to SVG"):
         page = doc[page_index]
         try:
-            # Base SVG with text and images
             svg_data = page.get_svg_image(text_as_path=True)
             svg_root = ET.fromstring(svg_data)
 
-            # Prepare <defs> for clip paths
+            # Ensure xlink namespace is present
+            if "xmlns:xlink" not in svg_root.attrib:
+                svg_root.attrib["xmlns:xlink"] = "http://www.w3.org/1999/xlink"
+
+            # Parse or set viewBox
+            viewbox = svg_root.attrib.get("viewBox")
+            if viewbox:
+                vb_x, vb_y, vb_w, vb_h = map(float, viewbox.strip().split())
+            else:
+                rect = page.rect
+                vb_x, vb_y, vb_w, vb_h = rect.x0, rect.y0, rect.width, rect.height
+                svg_root.attrib["viewBox"] = f"{vb_x} {vb_y} {vb_w} {vb_h}"
+
+            # === STEP 1: Render PNG background scaled to viewBox ===
+            zoom = 2
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            img_bytes = pix.tobytes("png")
+            img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+            img_elem = ET.Element("image", {
+                "x": str(vb_x), "y": str(vb_y),
+                "width": str(vb_w), "height": str(vb_h),
+                "preserveAspectRatio": "none",
+                "{http://www.w3.org/1999/xlink}href": f"data:image/png;base64,{img_base64}"
+            })
+
+            # Insert image right after <defs> if it exists
+            insert_index = 0
+            for i, child in enumerate(svg_root):
+                if child.tag.endswith('defs'):
+                    insert_index = i + 1
+                    break
+            svg_root.insert(insert_index, img_elem)
+
+            # === STEP 2: Add <defs> ===
             defs = ET.SubElement(svg_root, "defs")
 
-            # 1) Embed vector drawings
+            # === STEP 3: Vector drawings ===
             for idx, drawing in enumerate(page.get_drawings()):
                 clip_id = None
                 if "rect" in drawing or "clip" in drawing:
@@ -127,7 +155,7 @@ try:
                 if path_elem is not None:
                     svg_root.append(path_elem)
 
-            # 2) Embed annotation markups (lines, inks, highlights)
+            # === STEP 4: Annotations ===
             for annot in page.annots() or []:
                 subtype = annot.type[1]
                 if subtype == "Line":
@@ -135,7 +163,7 @@ try:
                     if len(verts) >= 2:
                         x1, y1 = verts[0].x, verts[0].y
                         x2, y2 = verts[1].x, verts[1].y
-                        clr = annot.colors.get("stroke", [0,0,0])
+                        clr = annot.colors.get("stroke", [0, 0, 0])
                         stroke = f"rgb({int(clr[0]*255)},{int(clr[1]*255)},{int(clr[2]*255)})"
                         lw = annot.border_width or 1
                         attribs = {"x1": str(x1), "y1": str(y1), "x2": str(x2), "y2": str(y2),
@@ -144,7 +172,7 @@ try:
                 elif subtype in ("Ink", "Polyline"):
                     verts = annot.vertices
                     points = " ".join(f"{v.x},{v.y}" for v in verts)
-                    clr = annot.colors.get("stroke", [0,0,0])
+                    clr = annot.colors.get("stroke", [0, 0, 0])
                     stroke = f"rgb({int(clr[0]*255)},{int(clr[1]*255)},{int(clr[2]*255)})"
                     lw = annot.border_width or 1
                     path = ET.Element("polyline", {"points": points,
@@ -153,7 +181,7 @@ try:
                                                     "stroke-width": str(lw)})
                     svg_root.append(path)
 
-            # Save SVG
+            # === STEP 5: Save to disk ===
             out_file = os.path.join(svg_pages_dir, f"page_{page_index+1}.svg")
             with open(out_file, 'w', encoding='utf-8') as f:
                 f.write(ET.tostring(svg_root, encoding='unicode'))
@@ -161,10 +189,10 @@ try:
             print(f"Exported page {page_index+1} → {out_file}")
 
         except Exception as e:
-            print(f"Error page {page_index+1}: {e}")
+            print(f"Error on page {page_index+1}: {e}")
             continue
 
-    print(f"--- Done ({svg_count}/{len(doc)} pages) ---")
+    print(f"--- Done ({svg_count}/{len(doc)} pages exported) ---")
 
 except Exception as e:
     print(f"Fatal error: {e}")

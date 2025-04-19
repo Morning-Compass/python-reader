@@ -1,69 +1,53 @@
 import os
 import fitz  # PyMuPDF
 import json
+from xml.etree import ElementTree as ET
 
+# Input PDF and output directory
 pdf_path = '23-10-EG-400-A-b_STD60_Klima_W&MPlanung_20250207.pdf'
 output_base = 'extracted_output'
 
+# Create base output folder and subdirectories
 os.makedirs(output_base, exist_ok=True)
 
-# --- Create Subdirectories ---
-images_dir = os.path.join(output_base, "images")
-texts_dir = os.path.join(output_base, "texts")
-svg_pages_dir = os.path.join(output_base, "svg_pages")
-drawings_dir = os.path.join(output_base, "drawings_data")
+images_dir      = os.path.join(output_base, "images")
+texts_dir       = os.path.join(output_base, "texts")
+svg_pages_dir   = os.path.join(output_base, "svg_pages")
+drawings_dir    = os.path.join(output_base, "drawings_data")
 attachments_dir = os.path.join(output_base, "attachments")
+vector_svgs_dir = os.path.join(output_base, "vector_svgs")
+for d in [images_dir, texts_dir, svg_pages_dir, drawings_dir, attachments_dir, vector_svgs_dir]:
+    os.makedirs(d, exist_ok=True)
 
-os.makedirs(images_dir, exist_ok=True)
-os.makedirs(texts_dir, exist_ok=True)
-os.makedirs(svg_pages_dir, exist_ok=True)
-os.makedirs(drawings_dir, exist_ok=True)
-os.makedirs(attachments_dir, exist_ok=True)
-
-print(f"Output directories created/ensured under: {output_base}")
+print(f"Output directories created under: {output_base}")
 
 try:
     # Open the PDF
     doc = fitz.open(pdf_path)
-    print(f"Successfully opened PDF: {pdf_path}")
-    print(f"Number of pages: {len(doc)}")
+    print(f"Successfully opened PDF: {pdf_path} ({len(doc)} pages)")
 
     # --- 1. Extract Raster Images ---
     print("\n--- Starting Raster Image Extraction ---")
     image_count = 0
     for page_index in range(len(doc)):
         page = doc[page_index]
-        image_list = page.get_images(full=True)
-        if not image_list:
-            continue
-
-        print(f"Found {len(image_list)} image(s) on page {page_index + 1}")
-        for img_index, img in enumerate(image_list):
+        for img in page.get_images(full=True):
             xref = img[0]
             try:
-                image_info = doc.extract_image(xref)
-                if not image_info:
-                    print(f"  - Could not extract image info for xref {xref} on page {page_index + 1}")
+                info = doc.extract_image(xref)
+                if not info:
                     continue
-
-                image_bytes = image_info["image"]
-                image_ext = image_info["ext"]
-
-                image_filename = f"page{page_index+1}_img{xref}.{image_ext}"
-                image_filepath = os.path.join(images_dir, image_filename)
-
-                # Save the image file
-                with open(image_filepath, "wb") as img_file:
-                    img_file.write(image_bytes)
-                print(f"  - Saved: {image_filepath}")
+                img_bytes = info['image']
+                ext = info['ext']
+                fname = f"page{page_index+1}_img{xref}.{ext}"
+                fpath = os.path.join(images_dir, fname)
+                with open(fpath, 'wb') as f:
+                    f.write(img_bytes)
+                print(f"Saved raster image: {fpath}")
                 image_count += 1
             except Exception as e:
-                print(f"  - Error extracting image xref {xref} on page {page_index + 1}: {e}")
-    if image_count == 0:
-         print("No raster images found or extracted.")
-    else:
-        print(f"--- Finished Raster Image Extraction ({image_count} images saved) ---")
-
+                print(f"Error extracting image xref {xref} on page {page_index+1}: {e}")
+    print(f"--- Raster images extracted: {image_count} ---")
 
     # --- 2. Extract Text from Each Page ---
     print("\n--- Starting Text Extraction ---")
@@ -72,106 +56,99 @@ try:
         try:
             text = page.get_text()
             if text.strip():
-                text_filename = f"page_{page_index+1}.txt"
-                text_filepath = os.path.join(texts_dir, text_filename)
-
-                with open(text_filepath, "w", encoding="utf-8") as text_file:
-                    text_file.write(text)
-                print(f"Extracted text from page {page_index+1} saved to: {text_filepath}")
-            else:
-                print(f"No text found on page {page_index+1}")
+                fname = f"page_{page_index+1}.txt"
+                fpath = os.path.join(texts_dir, fname)
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                print(f"Page {page_index+1} text saved: {fpath}")
         except Exception as e:
-            print(f"Error extracting text from page {page_index + 1}: {e}")
-    print("--- Finished Text Extraction ---")
-
+            print(f"Error extracting text on page {page_index+1}: {e}")
+    print("--- Text extraction complete ---")
 
     # --- 3. Extract Each Page as SVG ---
-    # This often captures vector graphics like DWG/SVG embedded in the page stream
     print("\n--- Starting Page SVG Export ---")
     svg_count = 0
     for page_index in range(len(doc)):
         page = doc[page_index]
         try:
-            svg_data = page.get_svg_image(text_as_path=False)
-
-            svg_filename = f"page_{page_index+1}.svg"
-            svg_filepath = os.path.join(svg_pages_dir, svg_filename)
-
-            with open(svg_filepath, "w", encoding="utf-8") as svg_file:
+            svg_data = page.get_svg_image(text_as_path=True)
+            fname = f"page_{page_index+1}.svg"
+            fpath = os.path.join(svg_pages_dir, fname)
+            with open(fpath, 'w', encoding='utf-8') as svg_file:
                 svg_file.write(svg_data)
-            print(f"Exported page {page_index+1} as SVG to: {svg_filepath}")
+            print(f"Exported page {page_index+1} as SVG to: {fpath}")
             svg_count += 1
         except Exception as e:
-            print(f"Error exporting page {page_index + 1} as SVG: {e}")
-    if svg_count > 0:
-        print(f"--- Finished Page SVG Export ({svg_count} SVGs saved) ---")
-    else:
-        print("--- No pages exported as SVG (check for errors above) ---")
+            print(f"Error exporting page {page_index+1} as SVG: {e}")
+    print(f"--- Finished Page SVG Export ({svg_count} SVGs saved) ---")
 
-
-    # --- 4. Extract Embedded Files / Attachments (Standard Method) ---
-    print("\n--- Checking for Standard Embedded Files (Attachments) ---")
+    # --- 4. Extract Embedded Files / Attachments ---
+    print("\n--- Starting Attachment Extraction ---")
     try:
         att_count = doc.embfile_count()
-        if att_count > 0:
-            print(f"Found {att_count} embedded file(s).")
-            for i in range(att_count):
-                try:
-                    info = doc.embfile_info(i)
-                    file_name = info["filename"]
-                    print(f"  - Extracting attachment: {file_name}")
-
-                    output_folder = attachments_dir
-
-                    extracted_data = doc.embfile_get(i)
-                    file_bytes = extracted_data.get('buffer') or extracted_data.get('file')
-
-                    if file_bytes:
-                        file_path = os.path.join(output_folder, file_name)
-                        with open(file_path, "wb") as att_file:
-                            att_file.write(file_bytes)
-                        print(f"    Saved attachment to: {file_path}")
-                    else:
-                        print(f"    Could not retrieve data for attachment: {file_name}")
-                except Exception as e:
-                    print(f"    Error processing attachment index {i} ({info.get('filename', 'N/A')}): {e}")
-        else:
-            print("No standard embedded attachments found.")
-        print("--- Finished Checking Attachments ---")
+        print(f"Found {att_count} embedded file(s).")
+        for i in range(att_count):
+            info = doc.embfile_info(i)
+            name = info.get('filename') or f'emb_{i}'
+            data = doc.embfile_get(i)
+            buf = data.get('buffer') or data.get('file')
+            if buf:
+                fpath = os.path.join(attachments_dir, name)
+                with open(fpath, 'wb') as f:
+                    f.write(buf)
+                print(f"Saved attachment: {fpath}")
     except Exception as e:
-        print(f"Error during attachment check/extraction: {e}")
+        print(f"Error extracting attachments: {e}")
+    print("--- Attachment extraction complete ---")
 
-
-    # --- [Optional] 5. Extract Raw Drawing Commands ---
-    # This extracts vector drawing commands (lines, curves, rects) as structured data.
-    # Useful for analysis but might not directly give you usable SVG/DWG files.
-    print("\n--- Starting Raw Drawing Extraction (Optional) ---")
-    drawing_count = 0
+    # --- 5. Extract Vector Graphics via SVG Parsing ---
+    print("\n--- Starting SVG-based Vector Extraction ---")
+    vector_tags = {'path', 'line', 'rect', 'circle', 'ellipse', 'polyline', 'polygon'}
+    vector_count = 0
     for page_index in range(len(doc)):
         page = doc[page_index]
         try:
-            drawings = page.get_drawings()
-            if drawings:
-                drawing_filename = f"page_{page_index+1}_drawings.json"
-                drawing_filepath = os.path.join(drawings_dir, drawing_filename)
+            # Render page to SVG
+            svg_data = page.get_svg_image(text_as_path=True)
+            # Parse SVG XML
+            root = ET.fromstring(svg_data)
+            ns = {'svg': root.tag.split('}')[0].strip('{')}
 
-                with open(drawing_filepath, "w", encoding="utf-8") as json_file:
-                    json.dump(drawings, json_file, indent=2)
-                print(f"Extracted drawing data for page {page_index+1} saved to: {drawing_filepath}")
-                drawing_count += 1
-            else:
-                print(f"No raw drawing commands found on page {page_index+1}")
+            # Collect vector elements
+            vectors = []
+            for tag in vector_tags:
+                vectors.extend(root.findall(f".//svg:{tag}", ns))
+
+            if not vectors:
+                print(f"No vector elements found on page {page_index+1}")
+                continue
+
+            # Build new SVG containing only vector shapes
+            new_svg = ET.Element('svg', {
+                'xmlns': 'http://www.w3.org/2000/svg',
+                'width': root.get('width', ''),
+                'height': root.get('height', ''),
+                'viewBox': root.get('viewBox', '')
+            })
+            for elem in vectors:
+                new_svg.append(elem)
+
+            out_svg = ET.tostring(new_svg, encoding='unicode')
+            fname = f"page_{page_index+1}_vectors.svg"
+            fpath = os.path.join(vector_svgs_dir, fname)
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(out_svg)
+
+            print(f"Extracted {len(vectors)} vector element(s) to: {fpath}")
+            vector_count += 1
         except Exception as e:
-            print(f"Error extracting drawings from page {page_index + 1}: {e}")
-    if drawing_count > 0:
-        print(f"--- Finished Raw Drawing Extraction ({drawing_count} files saved) ---")
-    else:
-        print("--- No raw drawings extracted ---")
+            print(f"Error parsing SVG vectors on page {page_index+1}: {e}")
+    print(f"--- Vector SVG pages extracted: {vector_count} ---")
 
 except FileNotFoundError:
     print(f"Error: PDF file not found at '{pdf_path}'")
 except fitz.fitz.FileNotFoundError:
-     print(f"Error: PyMuPDF could not open the file '{pdf_path}'. It might be corrupted or not a PDF.")
+    print(f"Error: PyMuPDF could not open the file '{pdf_path}'. It might be corrupted or not a PDF.")
 except Exception as e:
     print(f"An unexpected error occurred: {e}")
 finally:
